@@ -1,7 +1,9 @@
 use std::{
     cmp::{max, Reverse},
-    collections::{hash_map::Entry, BinaryHeap},
-    collections::{hash_map::Entry::Vacant, VecDeque},
+    collections::{
+        hash_map::Entry::{self, Vacant},
+        BinaryHeap, VecDeque,
+    },
     ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,6 +14,7 @@ use std::{
 use itertools::Itertools;
 use kaspa_math::int::SignedInteger;
 use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
 use rocksdb::WriteBatch;
 
 use kaspa_consensus_core::{
@@ -174,19 +177,20 @@ impl PruningProofManager {
     }
 
     pub fn import_pruning_points(&self, pruning_points: &[Arc<Header>]) {
-        for (i, header) in pruning_points.iter().enumerate() {
+        pruning_points.par_iter().enumerate().for_each(|(i, header)| {
             self.past_pruning_points_store.set(i as u64, header.hash).unwrap();
 
             if self.headers_store.has(header.hash).unwrap() {
-                continue;
+                return;
             }
 
             let state = kaspa_pow::State::new(header);
             let (_, pow) = state.check_pow(header.nonce);
             let signed_block_level = self.max_block_level as i64 - pow.bits() as i64;
             let block_level = max(signed_block_level, 0) as BlockLevel;
+
             self.headers_store.insert(header.hash, header.clone(), block_level).unwrap();
-        }
+        });
 
         let new_pruning_point = pruning_points.last().unwrap().hash;
         info!("Setting {new_pruning_point} as the staging pruning point");
