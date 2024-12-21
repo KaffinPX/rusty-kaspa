@@ -23,6 +23,7 @@ parking_lot.workspace = true
 rocksdb.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 kaspa-consensus.workspace = true

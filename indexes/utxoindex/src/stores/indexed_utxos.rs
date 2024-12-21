@@ -129,13 +129,13 @@ pub trait UtxoSetByScriptPublicKeyStoreReader {
 
 pub trait UtxoSetByScriptPublicKeyStore: UtxoSetByScriptPublicKeyStoreReader {
     /// remove [UtxoSetByScriptPublicKey] from the [UtxoSetByScriptPublicKeyStore].
-    fn remove_utxo_entries(&mut self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()>;
+    fn remove_utxo_entries(&self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()>;
 
     /// add [UtxoSetByScriptPublicKey] into the [UtxoSetByScriptPublicKeyStore].
-    fn add_utxo_entries(&mut self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()>;
+    fn add_utxo_entries(&self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()>;
 
     /// removes all entries in the cache and db, besides prefixes themselves.
-    fn delete_all(&mut self) -> StoreResult<()>;
+    fn delete_all(&self) -> StoreResult<()>;
 }
 
 // Implementations:
@@ -205,7 +205,7 @@ impl UtxoSetByScriptPublicKeyStoreReader for DbUtxoSetByScriptPublicKeyStore {
 }
 
 impl UtxoSetByScriptPublicKeyStore for DbUtxoSetByScriptPublicKeyStore {
-    fn remove_utxo_entries(&mut self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
+    fn remove_utxo_entries(&self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
         if utxo_entries.is_empty() {
             return Ok(());
         }
@@ -226,7 +226,7 @@ impl UtxoSetByScriptPublicKeyStore for DbUtxoSetByScriptPublicKeyStore {
         Ok(())
     }
 
-    fn add_utxo_entries(&mut self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
+    fn add_utxo_entries(&self, utxo_entries: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
         if utxo_entries.is_empty() {
             return Ok(());
         }
@@ -251,7 +251,7 @@ impl UtxoSetByScriptPublicKeyStore for DbUtxoSetByScriptPublicKeyStore {
     }
 
     /// Removes all entries in the cache and db, besides prefixes themselves.
-    fn delete_all(&mut self) -> StoreResult<()> {
+    fn delete_all(&self) -> StoreResult<()> {
         self.access.delete_all(DirectDbWriter::new(&self.db))
     }
 }

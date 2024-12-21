@@ -3268,6 +3268,7 @@ dependencies = [
  "log",
  "parking_lot",
  "rand",
+ "rayon",
  "rocksdb",
  "serde",
  "thiserror",

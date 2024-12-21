@@ -47,28 +47,9 @@ impl Store {
         self.utxos_by_script_public_key_store.get_all_outpoints()
     }
 
-    pub fn update_utxo_state(
-        &mut self,
-        to_add: &UtxoSetByScriptPublicKey,
-        to_remove: &UtxoSetByScriptPublicKey,
-        try_reset_on_err: bool,
-    ) -> StoreResult<()> {
-        let mut res = self.utxos_by_script_public_key_store.remove_utxo_entries(to_remove);
-
-        if res.is_err() {
-            if try_reset_on_err {
-                self.delete_all()?;
-            }
-            return res;
-        }
-
-        res = self.utxos_by_script_public_key_store.add_utxo_entries(to_add);
-
-        if try_reset_on_err && res.is_err() {
-            self.delete_all()?;
-        };
-
-        res
+    pub fn update_utxo_state(&self, to_add: &UtxoSetByScriptPublicKey, to_remove: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
+        self.utxos_by_script_public_key_store.remove_utxo_entries(to_remove)?;
+        self.utxos_by_script_public_key_store.add_utxo_entries(to_add)    
     }
 
     pub fn get_circulating_supply(&self) -> StoreResult<u64> {

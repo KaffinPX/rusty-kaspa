@@ -6,17 +6,25 @@ use crate::{
     update_container::UtxoIndexChanges,
     IDENT,
 };
-use kaspa_consensus_core::{tx::ScriptPublicKeys, utxo::utxo_diff::UtxoDiff, BlockHashSet};
+use kaspa_consensus_core::{
+    tx::{ScriptPublicKeys, TransactionOutpoint},
+    utxo::utxo_diff::UtxoDiff,
+    BlockHashSet,
+};
 use kaspa_consensusmanager::{ConsensusManager, ConsensusResetHandler};
 use kaspa_core::{info, trace};
 use kaspa_database::prelude::{StoreError, StoreResult, DB};
 use kaspa_hashes::Hash;
-use kaspa_index_core::indexed_utxos::BalanceByScriptPublicKey;
+use kaspa_index_core::indexed_utxos::{BalanceByScriptPublicKey, CompactUtxoEntry};
 use kaspa_utils::arc::ArcExtensions;
 use parking_lot::RwLock;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     fmt::Debug,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Weak,
+    },
 };
 
 const RESYNC_CHUNK_SIZE: usize = 2048; //Increased from 1k (used in go-kaspad), for quicker resets, while still having a low memory footprint.
@@ -86,7 +94,7 @@ impl UtxoIndexApi for UtxoIndex {
         utxoindex_changes.set_tips(tips.unwrap_or_clone().to_vec());
 
         // Commit changed utxo state to db
-        self.store.update_utxo_state(&utxoindex_changes.utxo_changes.added, &utxoindex_changes.utxo_changes.removed, false)?;
+        self.store.update_utxo_state(&utxoindex_changes.utxo_changes.added, &utxoindex_changes.utxo_changes.removed)?;
 
         // Commit circulating supply change (if monotonic) to db.
         if utxoindex_changes.supply_change > 0 {
@@ -142,39 +150,50 @@ impl UtxoIndexApi for UtxoIndex {
         let session = futures::executor::block_on(consensus.session_blocking());
 
         let consensus_tips = session.get_virtual_parents();
-        let mut circulating_supply: CirculatingSupply = 0;
+        let circulating_supply = AtomicU64::new(0);
+        let mut utxo_chunk = session.get_virtual_utxos(None, RESYNC_CHUNK_SIZE, false);
+        let mut current_chunk_size = utxo_chunk.len();
+        let mut checkpoints: Vec<Option<TransactionOutpoint>> = Vec::new();
 
-        //Initial batch is without specified seek and none-skipping.
-        let mut virtual_utxo_batch = session.get_virtual_utxos(None, RESYNC_CHUNK_SIZE, false);
-        let mut current_chunk_size = virtual_utxo_batch.len();
-        trace!("[{0}] resyncing with batch of {1} utxos from consensus db", IDENT, current_chunk_size);
-        // While loop stops resync attempts from an empty utxo db, and unneeded processing when the utxo state size happens to be a multiple of [`RESYNC_CHUNK_SIZE`]
         while current_chunk_size > 0 {
-            // Potential optimization TODO: iterating virtual utxos into an [UtxoIndexChanges] struct is a bit of overhead (i.e. a potentially unneeded loop),
-            // but some form of pre-iteration is done to extract and commit circulating supply separately.
-
-            let mut utxoindex_changes = UtxoIndexChanges::new(); //reset changes.
-
-            let next_outpoint_from = Some(virtual_utxo_batch.last().expect("expected a last outpoint").0);
-            utxoindex_changes.add_utxos_from_vector(virtual_utxo_batch);
-
-            circulating_supply += utxoindex_changes.supply_change as CirculatingSupply;
-
-            self.store.update_utxo_state(&utxoindex_changes.utxo_changes.added, &utxoindex_changes.utxo_changes.removed, true)?;
+            let next_outpoint = utxo_chunk.last().map(|(outpoint, _)| *outpoint);
+            checkpoints.push(next_outpoint);
 
             if current_chunk_size < RESYNC_CHUNK_SIZE {
                 break;
             };
 
-            virtual_utxo_batch = session.get_virtual_utxos(next_outpoint_from, RESYNC_CHUNK_SIZE, true);
-            current_chunk_size = virtual_utxo_batch.len();
-            trace!("[{0}] resyncing with batch of {1} utxos from consensus db", IDENT, current_chunk_size);
+            utxo_chunk = session.get_virtual_utxos(next_outpoint, RESYNC_CHUNK_SIZE, true);
+            current_chunk_size = utxo_chunk.len();
+        }
+
+        // Allocate an empty remove set as there wont be any removed UTXOs.
+        let empty_remove_set = UtxoSetByScriptPublicKey::new();
+
+        let synchronization = checkpoints.par_iter().try_for_each(|checkpoint| {
+            let utxo_batch = session.get_virtual_utxos(*checkpoint, RESYNC_CHUNK_SIZE, true);
+
+            // Increment supply over witnessed amount and index it by its ScriptPublicKey.
+            let mut added_utxos = UtxoSetByScriptPublicKey::new();
+            for (transaction_outpoint, utxo_entry) in utxo_batch {
+                circulating_supply.fetch_add(utxo_entry.amount, Ordering::Relaxed);
+                added_utxos.entry(utxo_entry.script_public_key).or_default().insert(
+                    transaction_outpoint,
+                    CompactUtxoEntry::new(utxo_entry.amount, utxo_entry.block_daa_score, utxo_entry.is_coinbase),
+                );
+            }
+            self.store.update_utxo_state(&added_utxos, &empty_remove_set)
+        });
+
+        // Synchronization might fail if theres some problem in database, in that case we should restart process.
+        if synchronization.is_err() {
+            self.store.delete_all()?;
+            synchronization.unwrap();
         }
 
         // Commit to the remaining stores.
-
-        trace!("[{0}] committing circulating supply {1} from consensus db", IDENT, circulating_supply);
-        self.store.insert_circulating_supply(circulating_supply, true)?;
+        trace!("[{0}] committing circulating supply {circulating_supply:?} from consensus db", IDENT);
+        self.store.insert_circulating_supply(circulating_supply.load(Ordering::Relaxed), true)?;
 
         trace!("[{0}] committing consensus tips {consensus_tips:?} from consensus db", IDENT);
         self.store.set_tips(consensus_tips, true)?;
