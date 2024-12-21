@@ -49,7 +49,7 @@ impl Store {
 
     pub fn update_utxo_state(&self, to_add: &UtxoSetByScriptPublicKey, to_remove: &UtxoSetByScriptPublicKey) -> StoreResult<()> {
         self.utxos_by_script_public_key_store.remove_utxo_entries(to_remove)?;
-        self.utxos_by_script_public_key_store.add_utxo_entries(to_add)    
+        self.utxos_by_script_public_key_store.add_utxo_entries(to_add)
     }
 
     pub fn get_circulating_supply(&self) -> StoreResult<u64> {
