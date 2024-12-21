@@ -192,8 +192,9 @@ impl UtxoIndexApi for UtxoIndex {
         }
 
         // Commit to the remaining stores.
-        trace!("[{0}] committing circulating supply {circulating_supply:?} from consensus db", IDENT);
-        self.store.insert_circulating_supply(circulating_supply.load(Ordering::Relaxed), true)?;
+        let circulating_supply = circulating_supply.load(Ordering::Relaxed) as CirculatingSupply;
+        trace!("[{0}] committing circulating supply {1} from consensus db", IDENT, circulating_supply);
+        self.store.insert_circulating_supply(circulating_supply, true)?;
 
         trace!("[{0}] committing consensus tips {consensus_tips:?} from consensus db", IDENT);
         self.store.set_tips(consensus_tips, true)?;
