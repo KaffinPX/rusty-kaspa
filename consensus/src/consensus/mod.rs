@@ -706,6 +706,22 @@ impl ConsensusApi for Consensus {
         iter.map(|item| item.unwrap()).collect()
     }
 
+    fn get_virtual_utxos_partitions(&self, chunk_size: usize) -> Vec<TransactionOutpoint> {
+        let virtual_stores = self.virtual_stores.read();
+        let mut partitions = Vec::new();
+
+        let mut iterator = virtual_stores.utxo_set.iterator();
+        if let Some(first) = iterator.next() {
+            partitions.push(first.unwrap().0);
+
+            while let Some(boundary) = iterator.nth(chunk_size - 1) {
+                partitions.push(boundary.unwrap().0);
+            }
+        }
+
+        partitions
+    }
+
     fn get_tips(&self) -> Vec<Hash> {
         self.body_tips_store.read().get().unwrap().read().iter().copied().collect_vec()
     }

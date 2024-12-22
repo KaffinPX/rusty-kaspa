@@ -6,11 +6,7 @@ use crate::{
     update_container::UtxoIndexChanges,
     IDENT,
 };
-use kaspa_consensus_core::{
-    tx::{ScriptPublicKeys, TransactionOutpoint},
-    utxo::utxo_diff::UtxoDiff,
-    BlockHashSet,
-};
+use kaspa_consensus_core::{tx::ScriptPublicKeys, utxo::utxo_diff::UtxoDiff, BlockHashSet};
 use kaspa_consensusmanager::{ConsensusManager, ConsensusResetHandler};
 use kaspa_core::{info, trace};
 use kaspa_database::prelude::{StoreError, StoreResult, DB};
@@ -151,37 +147,23 @@ impl UtxoIndexApi for UtxoIndex {
 
         let consensus_tips = session.get_virtual_parents();
         let circulating_supply = AtomicU64::new(0);
-        let mut utxo_chunk = session.get_virtual_utxos(None, RESYNC_CHUNK_SIZE, false);
-        let mut current_chunk_size = utxo_chunk.len();
-        let mut checkpoints: Vec<Option<TransactionOutpoint>> = Vec::new();
-
-        while current_chunk_size > 0 {
-            let next_outpoint = utxo_chunk.last().map(|(outpoint, _)| *outpoint);
-            checkpoints.push(next_outpoint);
-
-            if current_chunk_size < RESYNC_CHUNK_SIZE {
-                break;
-            };
-
-            utxo_chunk = session.get_virtual_utxos(next_outpoint, RESYNC_CHUNK_SIZE, true);
-            current_chunk_size = utxo_chunk.len();
-        }
+        let partitions = session.get_virtual_utxos_partitions(RESYNC_CHUNK_SIZE);
 
         // Allocate an empty remove set as there wont be any removed UTXOs.
         let empty_remove_set = UtxoSetByScriptPublicKey::new();
 
-        let synchronization = checkpoints.par_iter().try_for_each(|checkpoint| {
-            let utxo_batch = session.get_virtual_utxos(*checkpoint, RESYNC_CHUNK_SIZE, true);
-
-            // Increment supply over witnessed amount and index it by its ScriptPublicKey.
+        let synchronization = partitions.par_iter().try_for_each(|outpoint| {
+            let utxo_chunk = session.get_virtual_utxos(Some(*outpoint), RESYNC_CHUNK_SIZE, false);
             let mut added_utxos = UtxoSetByScriptPublicKey::new();
-            for (transaction_outpoint, utxo_entry) in utxo_batch {
+
+            for (transaction_outpoint, utxo_entry) in utxo_chunk {
                 circulating_supply.fetch_add(utxo_entry.amount, Ordering::Relaxed);
                 added_utxos.entry(utxo_entry.script_public_key).or_default().insert(
                     transaction_outpoint,
                     CompactUtxoEntry::new(utxo_entry.amount, utxo_entry.block_daa_score, utxo_entry.is_coinbase),
                 );
             }
+
             self.store.update_utxo_state(&added_utxos, &empty_remove_set)
         });
 
@@ -198,6 +180,8 @@ impl UtxoIndexApi for UtxoIndex {
 
         trace!("[{0}] committing consensus tips {consensus_tips:?} from consensus db", IDENT);
         self.store.set_tips(consensus_tips, true)?;
+
+        println!("Total utxos on index: {0}", self.store.get_all_outpoints().unwrap().len());
 
         Ok(())
     }
