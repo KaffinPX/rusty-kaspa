@@ -187,10 +187,6 @@ pub trait ConsensusApi: Send + Sync {
         unimplemented!()
     }
 
-    fn get_virtual_utxos_partitions(&self, chunk_size: usize) -> Vec<TransactionOutpoint> {
-        unimplemented!()
-    }
-
     fn get_tips(&self) -> Vec<Hash> {
         unimplemented!()
     }

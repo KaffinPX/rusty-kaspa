@@ -6,7 +6,11 @@ use crate::{
     update_container::UtxoIndexChanges,
     IDENT,
 };
-use kaspa_consensus_core::{tx::ScriptPublicKeys, utxo::utxo_diff::UtxoDiff, BlockHashSet};
+use kaspa_consensus_core::{
+    tx::ScriptPublicKeys,
+    utxo::{self, utxo_diff::UtxoDiff},
+    BlockHashSet,
+};
 use kaspa_consensusmanager::{ConsensusManager, ConsensusResetHandler};
 use kaspa_core::{info, trace};
 use kaspa_database::prelude::{StoreError, StoreResult, DB};
@@ -14,16 +18,20 @@ use kaspa_hashes::Hash;
 use kaspa_index_core::indexed_utxos::{BalanceByScriptPublicKey, CompactUtxoEntry};
 use kaspa_utils::arc::ArcExtensions;
 use parking_lot::RwLock;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::{
+    iter::{IntoParallelRefIterator, ParallelIterator},
+    slice::ParallelSlice,
+};
 use std::{
     fmt::Debug,
+    mem,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Weak,
     },
 };
 
-const RESYNC_CHUNK_SIZE: usize = 2048; //Increased from 1k (used in go-kaspad), for quicker resets, while still having a low memory footprint.
+const RESYNC_CHUNK_SIZE: usize = 32768; //Increased from 1k (used in go-kaspad), for quicker resets, while still having a low memory footprint.
 
 /// UtxoIndex indexes `CompactUtxoEntryCollections` by [`ScriptPublicKey`](kaspa_consensus_core::tx::ScriptPublicKey),
 /// commits them to its owns store, and emits changes.
@@ -147,30 +155,40 @@ impl UtxoIndexApi for UtxoIndex {
 
         let consensus_tips = session.get_virtual_parents();
         let circulating_supply = AtomicU64::new(0);
-        let partitions = session.get_virtual_utxos_partitions(RESYNC_CHUNK_SIZE);
+        let mut utxos_chunk = session.get_virtual_utxos(None, RESYNC_CHUNK_SIZE, false);
+        let mut current_chunk_size = utxos_chunk.len();
 
         // Allocate an empty remove set as there wont be any removed UTXOs.
         let empty_remove_set = UtxoSetByScriptPublicKey::new();
 
-        let synchronization = partitions.par_iter().try_for_each(|outpoint| {
-            let utxo_chunk = session.get_virtual_utxos(Some(*outpoint), RESYNC_CHUNK_SIZE, false);
-            let mut added_utxos = UtxoSetByScriptPublicKey::new();
+        while current_chunk_size > 0 {
+            let next_outpoint_from = Some(utxos_chunk.last().expect("expected a last outpoint").0);
+            let synchronization = utxos_chunk.par_chunks(16).try_for_each(|chunk| {
+                let mut added_utxos = UtxoSetByScriptPublicKey::new();
+                for (transaction_outpoint, utxo_entry) in chunk {
+                    circulating_supply.fetch_add(utxo_entry.amount, Ordering::Relaxed);
+                    added_utxos.entry(utxo_entry.script_public_key.clone()).or_default().insert(
+                        *transaction_outpoint,
+                        CompactUtxoEntry::new(utxo_entry.amount, utxo_entry.block_daa_score, utxo_entry.is_coinbase),
+                    );
+                }
 
-            for (transaction_outpoint, utxo_entry) in utxo_chunk {
-                circulating_supply.fetch_add(utxo_entry.amount, Ordering::Relaxed);
-                added_utxos.entry(utxo_entry.script_public_key).or_default().insert(
-                    transaction_outpoint,
-                    CompactUtxoEntry::new(utxo_entry.amount, utxo_entry.block_daa_score, utxo_entry.is_coinbase),
-                );
+                self.store.update_utxo_state(&added_utxos, &empty_remove_set)
+            });
+
+            // Synchronization might fail if theres some problem in database, in that case we should restart process.
+            if synchronization.is_err() {
+                self.store.delete_all()?;
+                synchronization.unwrap();
             }
 
-            self.store.update_utxo_state(&added_utxos, &empty_remove_set)
-        });
+            if current_chunk_size < RESYNC_CHUNK_SIZE {
+                break;
+            };
 
-        // Synchronization might fail if theres some problem in database, in that case we should restart process.
-        if synchronization.is_err() {
-            self.store.delete_all()?;
-            synchronization.unwrap();
+            utxos_chunk = session.get_virtual_utxos(next_outpoint_from, RESYNC_CHUNK_SIZE, true);
+            current_chunk_size = utxos_chunk.len();
+            trace!("[{0}] resyncing with batch of {1} utxos from consensus db", IDENT, current_chunk_size);
         }
 
         // Commit to the remaining stores.
@@ -243,7 +261,7 @@ mod tests {
     fn test_utxoindex() {
         kaspa_core::log::try_init_logger("INFO");
 
-        let resync_utxo_collection_size = 10_000;
+        let resync_utxo_collection_size = 1_000_000;
         let update_utxo_collection_size = 1_000;
         let script_public_key_pool_size = 200;
 
